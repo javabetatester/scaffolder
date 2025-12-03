@@ -169,6 +169,8 @@ func init() {
 		Content: `package cmd
 
 import (
+	"fmt"
+
 	"github.com/{{.ModuleName}}/internal/pkg/logger"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
@@ -179,8 +181,17 @@ var exampleCmd = &cobra.Command{
 	Short: "Example command",
 	Long:  "Example command that demonstrates basic functionality",
 	Args:  cobra.MinimumNArgs(1),
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		name := args[0]
+		
+		if name == "" {
+			return fmt.Errorf("name cannot be empty")
+		}
+		
+		if len(name) > 100 {
+			return fmt.Errorf("name must be less than 100 characters")
+		}
+		
 		verbose, _ := cmd.Flags().GetBool("verbose")
 		
 		log := logger.New(verbose)
@@ -188,6 +199,8 @@ var exampleCmd = &cobra.Command{
 		
 		log.Debug("Running example command with verbose mode")
 		log.Info("Hello", zap.String("name", name))
+		
+		return nil
 	},
 }
 
