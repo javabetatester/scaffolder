@@ -184,11 +184,16 @@ import (
 )
 
 type Config struct {
-	Environment    string
-	ServerPort     int
-	MetricsPort    int
-	JaegerEndpoint string
-	LogLevel       string
+	Environment     string
+	ServerPort       int
+	MetricsPort      int
+	JaegerEndpoint   string
+	LogLevel         string
+	DatabaseURL      string
+	DatabaseMaxConns int
+	RedisURL         string
+	RedisPassword    string
+	RedisDB          int
 }
 
 func Load() *Config {
@@ -221,12 +226,43 @@ func Load() *Config {
 		jaegerEndpoint = "http://localhost:14268/api/traces"
 	}
 
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = "postgres://user:password@localhost:5432/{{.PackageName}}?sslmode=disable"
+	}
+
+	maxConns := 25
+	if maxConnsStr := os.Getenv("DATABASE_MAX_CONNS"); maxConnsStr != "" {
+		if mc, err := strconv.Atoi(maxConnsStr); err == nil {
+			maxConns = mc
+		}
+	}
+
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		redisURL = "localhost:6379"
+	}
+
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+
+	redisDB := 0
+	if redisDBStr := os.Getenv("REDIS_DB"); redisDBStr != "" {
+		if db, err := strconv.Atoi(redisDBStr); err == nil {
+			redisDB = db
+		}
+	}
+
 	return &Config{
-		Environment:    env,
-		ServerPort:     port,
-		MetricsPort:    metricsPort,
-		JaegerEndpoint: jaegerEndpoint,
-		LogLevel:       logLevel,
+		Environment:     env,
+		ServerPort:       port,
+		MetricsPort:      metricsPort,
+		JaegerEndpoint:   jaegerEndpoint,
+		LogLevel:         logLevel,
+		DatabaseURL:      databaseURL,
+		DatabaseMaxConns: maxConns,
+		RedisURL:         redisURL,
+		RedisPassword:    redisPassword,
+		RedisDB:          redisDB,
 	}
 }
 `,
@@ -888,6 +924,19 @@ test-coverage:
 test-unit:
 	go test -v -short ./...
 
+.PHONY: migrate-up
+migrate-up:
+	migrate -path migrations -database "$$DATABASE_URL" up
+
+.PHONY: migrate-down
+migrate-down:
+	migrate -path migrations -database "$$DATABASE_URL" down
+
+.PHONY: migrate-create
+migrate-create:
+	@read -p "Migration name: " name; \
+	migrate create -ext sql -dir migrations -seq $$name
+
 .PHONY: clean
 clean:
 	rm -rf bin/
@@ -954,7 +1003,16 @@ proto/*_grpc.pb.go
 			"```\n\n" +
 			"## Environment Variables\n\n" +
 			"- PORT: Server port (default: 50051)\n" +
-			"- ENVIRONMENT: Environment name (default: development)\n\n" +
+			"- ENVIRONMENT: Environment name (default: development)\n" +
+			"- DATABASE_URL: PostgreSQL connection string\n" +
+			"- DATABASE_MAX_CONNS: Maximum database connections (default: 25)\n" +
+			"- REDIS_URL: Redis server address (default: localhost:6379)\n" +
+			"- REDIS_PASSWORD: Redis password (optional)\n" +
+			"- REDIS_DB: Redis database number (default: 0)\n\n" +
+			"## Database Migrations\n\n" +
+			"```bash\n" +
+			"migrate -path migrations -database \"$DATABASE_URL\" up\n" +
+			"```\n\n" +
 			"## gRPC Services\n\n" +
 			"- HealthCheck: Health check endpoint\n" +
 			"- GetEntity: Get entity by ID\n" +
