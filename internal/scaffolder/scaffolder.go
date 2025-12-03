@@ -99,5 +99,6 @@ func (s *Scaffolder) OutputDir() string {
 }
 
 func (s *Scaffolder) joinPath(elem ...string) string {
-	return filepath.Join(s.outputDir, filepath.Join(elem...))
+	parts := append([]string{s.outputDir}, elem...)
+	return filepath.Join(parts...)
 }
