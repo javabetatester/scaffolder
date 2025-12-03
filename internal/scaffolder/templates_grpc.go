@@ -8,6 +8,7 @@ var grpcTemplates = []FileTemplate{
 go 1.21
 
 require (
+	github.com/google/uuid v1.5.0
 	google.golang.org/grpc v1.60.1
 	google.golang.org/protobuf v1.31.0
 )
@@ -252,7 +253,6 @@ type Repository interface {
 import (
 	"context"
 	"fmt"
-	"time"
 
 	"github.com/{{.ModuleName}}/internal/domain/entity"
 	"github.com/{{.ModuleName}}/internal/domain/repository"
