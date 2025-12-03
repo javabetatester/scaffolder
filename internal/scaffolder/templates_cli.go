@@ -169,9 +169,9 @@ func init() {
 		Content: `package cmd
 
 import (
-	"fmt"
-
+	"github.com/{{.ModuleName}}/internal/pkg/logger"
 	"github.com/spf13/cobra"
+	"go.uber.org/zap"
 )
 
 var exampleCmd = &cobra.Command{
@@ -183,11 +183,11 @@ var exampleCmd = &cobra.Command{
 		name := args[0]
 		verbose, _ := cmd.Flags().GetBool("verbose")
 		
-		if verbose {
-			fmt.Printf("Running example command with verbose mode\n")
-		}
+		log := logger.New(verbose)
+		defer log.Sync()
 		
-		fmt.Printf("Hello, %s!\n", name)
+		log.Debug("Running example command with verbose mode")
+		log.Info("Hello", zap.String("name", name))
 	},
 }
 
@@ -231,36 +231,30 @@ func Load() *Config {
 		Content: `package logger
 
 import (
-	"fmt"
-	"os"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 )
 
-type Logger struct {
-	verbose bool
-}
-
-func New(verbose bool) *Logger {
-	return &Logger{
-		verbose: verbose,
+func New(verbose bool) *zap.Logger {
+	var level zapcore.Level
+	if verbose {
+		level = zapcore.DebugLevel
+	} else {
+		level = zapcore.InfoLevel
 	}
-}
 
-func (l *Logger) Info(msg string) {
-	fmt.Fprintf(os.Stdout, "[INFO] %s\n", msg)
-}
+	config := zap.NewDevelopmentConfig()
+	config.Level = zap.NewAtomicLevelAt(level)
+	config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 
-func (l *Logger) Error(msg string) {
-	fmt.Fprintf(os.Stderr, "[ERROR] %s\n", msg)
-}
-
-func (l *Logger) Debug(msg string) {
-	if l.verbose {
-		fmt.Fprintf(os.Stdout, "[DEBUG] %s\n", msg)
+	logger, err := config.Build()
+	if err != nil {
+		panic(err)
 	}
-}
 
-func (l *Logger) Warn(msg string) {
-	fmt.Fprintf(os.Stderr, "[WARN] %s\n", msg)
+	return logger.With(
+		zap.String("service", "{{.PackageName}}"),
+	)
 }
 `,
 		Permissions: 0644,
