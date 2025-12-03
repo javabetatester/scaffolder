@@ -35,7 +35,7 @@ func (s *Scaffolder) Generate() error {
 	case "rest":
 		return s.generateREST(vars)
 	case "grpc":
-		return fmt.Errorf("grpc template not yet implemented")
+		return s.generateGRPC(vars)
 	case "cli":
 		return fmt.Errorf("cli template not yet implemented")
 	default:
@@ -45,6 +45,15 @@ func (s *Scaffolder) Generate() error {
 
 func (s *Scaffolder) generateREST(vars *TemplateVars) error {
 	for _, tmpl := range restTemplates {
+		if err := s.createFileFromTemplate(tmpl, vars); err != nil {
+			return fmt.Errorf("failed to create file %s: %w", tmpl.Path, err)
+		}
+	}
+	return nil
+}
+
+func (s *Scaffolder) generateGRPC(vars *TemplateVars) error {
+	for _, tmpl := range grpcTemplates {
 		if err := s.createFileFromTemplate(tmpl, vars); err != nil {
 			return fmt.Errorf("failed to create file %s: %w", tmpl.Path, err)
 		}
