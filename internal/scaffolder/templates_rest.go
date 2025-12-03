@@ -1069,6 +1069,19 @@ test-unit:
 test-integration:
 	go test -v -tags=integration ./...
 
+.PHONY: migrate-up
+migrate-up:
+	migrate -path migrations -database "$$DATABASE_URL" up
+
+.PHONY: migrate-down
+migrate-down:
+	migrate -path migrations -database "$$DATABASE_URL" down
+
+.PHONY: migrate-create
+migrate-create:
+	@read -p "Migration name: " name; \
+	migrate create -ext sql -dir migrations -seq $$name
+
 .PHONY: lint
 lint:
 	golangci-lint run
@@ -1299,7 +1312,16 @@ coverage.txt
 			"```\n\n" +
 			"## Environment Variables\n\n" +
 			"- PORT: Server port (default: 8080)\n" +
-			"- ENVIRONMENT: Environment name (default: development)\n\n" +
+			"- ENVIRONMENT: Environment name (default: development)\n" +
+			"- DATABASE_URL: PostgreSQL connection string\n" +
+			"- DATABASE_MAX_CONNS: Maximum database connections (default: 25)\n" +
+			"- REDIS_URL: Redis server address (default: localhost:6379)\n" +
+			"- REDIS_PASSWORD: Redis password (optional)\n" +
+			"- REDIS_DB: Redis database number (default: 0)\n\n" +
+			"## Database Migrations\n\n" +
+			"```bash\n" +
+			"migrate -path migrations -database \"$DATABASE_URL\" up\n" +
+			"```\n\n" +
 			"## API Endpoints\n\n" +
 			"- GET /api/v1/health - Health check endpoint\n",
 		Permissions: 0644,
