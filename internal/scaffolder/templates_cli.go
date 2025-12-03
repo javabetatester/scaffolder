@@ -302,6 +302,210 @@ coverage.txt
 		Permissions: 0644,
 	},
 	{
+		Path: "Dockerfile",
+		Content: `FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o {{.PackageName}} ./cmd/{{.PackageName}}
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+WORKDIR /root/
+
+COPY --from=builder /app/{{.PackageName}} .
+
+ENTRYPOINT ["./{{.PackageName}}"]
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: ".dockerignore",
+		Content: `bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+*.test
+*.out
+coverage.txt
+coverage.out
+coverage.html
+
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+.env
+.env.local
+
+.git/
+.gitignore
+README.md
+Makefile
+
+*.md
+*.yaml
+!*.example.yaml
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: ".github/workflows/ci.yml",
+		Content: `name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run tests
+      run: go test -v -coverprofile=coverage.out ./...
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.out
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Build
+      run: go build -o bin/{{.PackageName}} ./cmd/{{.PackageName}}
+
+    - name: Build Docker image
+      run: docker build -t {{.PackageName}}:${{ github.sha }} .
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "CONTRIBUTING.md",
+		Content: "# Contributing\n\n" +
+			"Thank you for considering contributing to {{.ProjectName}}!\n\n" +
+			"## Development Setup\n\n" +
+			"1. Fork the repository\n" +
+			"2. Clone your fork\n" +
+			"3. Create a feature branch\n" +
+			"4. Make your changes\n" +
+			"5. Run tests: make test\n" +
+			"6. Run linter: make lint\n" +
+			"7. Commit your changes\n" +
+			"8. Push to your fork\n" +
+			"9. Create a Pull Request\n\n" +
+			"## Code Style\n\n" +
+			"- Follow Go conventions\n" +
+			"- Use gofmt for formatting\n" +
+			"- Follow SOLID principles\n" +
+			"- Write tests for new features\n" +
+			"- Update documentation as needed\n\n" +
+			"## Commit Messages\n\n" +
+			"Use clear, descriptive commit messages following conventional commits format.\n",
+		Permissions: 0644,
+	},
+	{
+		Path: "LICENSE",
+		Content: `MIT License
+
+Copyright (c) 2024 {{.ProjectName}}
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "CHANGELOG.md",
+		Content: `# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- Initial project structure
+- CLI application with Cobra
+- Configuration management with Viper
+- Structured logging with Zap
+- Modular command structure
+- Docker setup
+- CI/CD with GitHub Actions
+`,
+		Permissions: 0644,
+	},
+	{
 		Path: "README.md",
 		Content: "# {{.ProjectName}}\n\n" +
 			"CLI application built with Go and Cobra framework.\n\n" +
@@ -333,6 +537,11 @@ coverage.txt
 			"./bin/{{.PackageName}} example world\n" +
 			"./bin/{{.PackageName}} config show\n" +
 			"```\n\n" +
+			"### Docker\n\n" +
+			"```bash\n" +
+			"docker build -t {{.PackageName}} .\n" +
+			"docker run {{.PackageName}} version\n" +
+			"```\n\n" +
 			"## Commands\n\n" +
 			"- `version`: Print the version number\n" +
 			"- `example [name]`: Example command\n" +
@@ -343,7 +552,25 @@ coverage.txt
 			"1. Command line flags\n" +
 			"2. Environment variables\n" +
 			"3. Config file (YAML) in home directory or current directory\n\n" +
-			"Config file name: `.{{.PackageName}}.yaml`\n",
+			"Config file name: `.{{.PackageName}}.yaml`\n\n" +
+			"## Architecture\n\n" +
+			"This project follows Clean Architecture principles:\n\n" +
+			"- **Command Layer**: Cobra commands and CLI interface\n" +
+			"- **Config Layer**: Configuration management with Viper\n" +
+			"- **Package Layer**: Shared utilities (logger, etc.)\n\n" +
+			"## Features\n\n" +
+			"- Structured logging with Zap\n" +
+			"- Configuration management with Viper\n" +
+			"- Modular command structure\n" +
+			"- Persistent flags\n" +
+			"- Help system\n\n" +
+			"## Development\n\n" +
+			"```bash\n" +
+			"make test          # Run tests\n" +
+			"make test-coverage # Run tests with coverage\n" +
+			"make lint         # Run linter\n" +
+			"make fmt          # Format code\n" +
+			"```\n",
 		Permissions: 0644,
 	},
 	{
@@ -416,9 +643,25 @@ test-coverage:
 test-unit:
 	go test -v -short ./...
 
+.PHONY: docker-build
+docker-build:
+	docker build -t {{.PackageName}}:latest .
+
+.PHONY: docker-run
+docker-run:
+	docker run {{.PackageName}}:latest
+
 .PHONY: lint
 lint:
 	golangci-lint run
+
+.PHONY: fmt
+fmt:
+	go fmt ./...
+
+.PHONY: vet
+vet:
+	go vet ./...
 `,
 		Permissions: 0644,
 	},
