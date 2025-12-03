@@ -9,6 +9,12 @@ go 1.21
 
 require (
 	github.com/google/uuid v1.5.0
+	go.uber.org/zap v1.26.0
+	github.com/prometheus/client_golang v1.18.0
+	go.opentelemetry.io/otel v1.21.0
+	go.opentelemetry.io/otel/trace v1.21.0
+	go.opentelemetry.io/otel/exporters/jaeger v1.17.0
+	go.opentelemetry.io/otel/sdk v1.21.0
 	google.golang.org/grpc v1.60.1
 	google.golang.org/protobuf v1.31.0
 )
@@ -22,36 +28,63 @@ require (
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+	"github.com/{{.ModuleName}}/internal/infrastructure/interceptor"
+	"github.com/{{.ModuleName}}/internal/infrastructure/logger"
+	"github.com/{{.ModuleName}}/internal/infrastructure/metrics"
 	"github.com/{{.ModuleName}}/internal/infrastructure/server"
+	"github.com/{{.ModuleName}}/internal/infrastructure/tracing"
 	pb "github.com/{{.ModuleName}}/proto/{{.PackageName}}"
 	"google.golang.org/grpc"
+	"go.uber.org/zap"
 )
 
 func main() {
 	cfg := config.Load()
 
+	log := logger.New(cfg)
+	defer log.Sync()
+
+	tracer, err := tracing.NewTracer(cfg, log)
+	if err != nil {
+		log.Fatal("failed to initialize tracer", zap.Error(err))
+	}
+	defer tracer.Shutdown(context.Background())
+
+	metricsServer := metrics.NewServer(cfg, log)
+	go func() {
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("failed to start metrics server", zap.Error(err))
+		}
+	}()
+
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.ServerPort))
 	if err != nil {
-		log.Fatalf("failed to listen: %v", err)
+		log.Fatal("failed to listen", zap.Error(err))
 	}
 
-	s := grpc.NewServer()
-	grpcServer := server.NewGRPCServer()
-	
+	s := grpc.NewServer(
+		grpc.UnaryInterceptor(interceptor.ChainUnary(
+			interceptor.Logger(log),
+			interceptor.Metrics(),
+			interceptor.Tracing(tracer),
+		)),
+	)
+
+	grpcServer := server.NewGRPCServer(log)
 	pb.Register{{.ProjectNamePascal}}ServiceServer(s, grpcServer)
 
 	go func() {
-		log.Printf("gRPC server started on port %d", cfg.ServerPort)
+		log.Info("gRPC server started", zap.Int("port", cfg.ServerPort), zap.Int("metrics_port", cfg.MetricsPort))
 		if err := s.Serve(lis); err != nil {
-			log.Fatalf("failed to serve: %v", err)
+			log.Fatal("failed to serve", zap.Error(err))
 		}
 	}()
 
@@ -59,7 +92,7 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Println("shutting down server...")
+	log.Info("shutting down server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -72,13 +105,13 @@ func main() {
 
 	select {
 	case <-done:
-		log.Println("server stopped gracefully")
+		log.Info("server stopped gracefully")
 	case <-ctx.Done():
-		log.Println("server forced to shutdown")
+		log.Info("server forced to shutdown")
 		s.Stop()
 	}
 
-	log.Println("server exited")
+	log.Info("server exited")
 }
 `,
 		Permissions: 0644,
@@ -133,8 +166,11 @@ import (
 )
 
 type Config struct {
-	Environment string
-	ServerPort  int
+	Environment    string
+	ServerPort     int
+	MetricsPort    int
+	JaegerEndpoint string
+	LogLevel       string
 }
 
 func Load() *Config {
@@ -145,14 +181,34 @@ func Load() *Config {
 		}
 	}
 
+	metricsPort := 9090
+	if portStr := os.Getenv("METRICS_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			metricsPort = p
+		}
+	}
+
 	env := os.Getenv("ENVIRONMENT")
 	if env == "" {
 		env = "development"
 	}
 
+	logLevel := os.Getenv("LOG_LEVEL")
+	if logLevel == "" {
+		logLevel = "info"
+	}
+
+	jaegerEndpoint := os.Getenv("JAEGER_ENDPOINT")
+	if jaegerEndpoint == "" {
+		jaegerEndpoint = "http://localhost:14268/api/traces"
+	}
+
 	return &Config{
-		Environment: env,
-		ServerPort:  port,
+		Environment:    env,
+		ServerPort:     port,
+		MetricsPort:    metricsPort,
+		JaegerEndpoint: jaegerEndpoint,
+		LogLevel:       logLevel,
 	}
 }
 `,
@@ -168,6 +224,7 @@ import (
 	"github.com/{{.ModuleName}}/internal/infrastructure/repository"
 	"github.com/{{.ModuleName}}/internal/usecase"
 	pb "github.com/{{.ModuleName}}/proto/{{.PackageName}}"
+	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -175,14 +232,16 @@ import (
 type GRPCServer struct {
 	pb.Unimplemented{{.ProjectNamePascal}}ServiceServer
 	useCase *usecase.UseCase
+	log     *zap.Logger
 }
 
-func NewGRPCServer() *GRPCServer {
+func NewGRPCServer(log *zap.Logger) *GRPCServer {
 	repo := repository.NewRepository()
 	useCase := usecase.NewUseCase(repo)
 
 	return &GRPCServer{
 		useCase: useCase,
+		log:     log,
 	}
 }
 
@@ -364,6 +423,265 @@ run:
 .PHONY: build
 build:
 	go build -o bin/server cmd/server/main.go
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/infrastructure/logger/logger.go",
+		Content: `package logger
+
+import (
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+
+	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+)
+
+func New(cfg *config.Config) *zap.Logger {
+	var logger *zap.Logger
+	var err error
+
+	if cfg.Environment == "production" {
+		config := zap.NewProductionConfig()
+		config.Level = parseLogLevel(cfg.LogLevel)
+		logger, err = config.Build()
+	} else {
+		config := zap.NewDevelopmentConfig()
+		config.Level = parseLogLevel(cfg.LogLevel)
+		logger, err = config.Build()
+	}
+
+	if err != nil {
+		panic(err)
+	}
+
+	return logger.With(
+		zap.String("service", "{{.PackageName}}"),
+		zap.String("environment", cfg.Environment),
+	)
+}
+
+func parseLogLevel(level string) zapcore.Level {
+	switch level {
+	case "debug":
+		return zapcore.DebugLevel
+	case "info":
+		return zapcore.InfoLevel
+	case "warn":
+		return zapcore.WarnLevel
+	case "error":
+		return zapcore.ErrorLevel
+	default:
+		return zapcore.InfoLevel
+	}
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/infrastructure/metrics/metrics.go",
+		Content: `package metrics
+
+import (
+	"fmt"
+	"net/http"
+
+	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap"
+)
+
+var (
+	GRPCRequestsTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "grpc_requests_total",
+			Help: "Total number of gRPC requests",
+		},
+		[]string{"method", "code"},
+	)
+
+	GRPCRequestDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "grpc_request_duration_seconds",
+			Help:    "gRPC request duration in seconds",
+			Buckets: prometheus.DefBuckets,
+		},
+		[]string{"method"},
+	)
+)
+
+func init() {
+	prometheus.MustRegister(GRPCRequestsTotal)
+	prometheus.MustRegister(GRPCRequestDuration)
+}
+
+type Server struct {
+	*http.Server
+}
+
+func NewServer(cfg *config.Config, log *zap.Logger) *Server {
+	mux := http.NewServeMux()
+	mux.Handle("/metrics", promhttp.Handler())
+
+	return &Server{
+		Server: &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.MetricsPort),
+			Handler: mux,
+		},
+	}
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/infrastructure/tracing/tracing.go",
+		Content: `package tracing
+
+import (
+	"context"
+
+	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/jaeger"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/resource"
+	tracesdk "go.opentelemetry.io/otel/sdk/trace"
+	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+)
+
+type Tracer struct {
+	tp *tracesdk.TracerProvider
+}
+
+func NewTracer(cfg *config.Config, log *zap.Logger) (trace.TracerProvider, error) {
+	exp, err := jaeger.New(jaeger.WithCollectorEndpoint(jaeger.WithEndpoint(cfg.JaegerEndpoint)))
+	if err != nil {
+		return nil, err
+	}
+
+	tp := tracesdk.NewTracerProvider(
+		tracesdk.WithBatcher(exp),
+		tracesdk.WithResource(resource.NewWithAttributes(
+			semconv.SchemaURL,
+			semconv.ServiceNameKey.String("{{.PackageName}}"),
+			semconv.ServiceVersionKey.String("1.0.0"),
+		)),
+	)
+
+	otel.SetTracerProvider(tp)
+	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	))
+
+	return &Tracer{tp: tp}, nil
+}
+
+func (t *Tracer) Shutdown(ctx context.Context) error {
+	return t.tp.Shutdown(ctx)
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/infrastructure/interceptor/interceptor.go",
+		Content: `package interceptor
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/{{.ModuleName}}/internal/infrastructure/metrics"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
+	"go.uber.org/zap"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/status"
+)
+
+func ChainUnary(interceptors ...grpc.UnaryServerInterceptor) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		chain := handler
+		for i := len(interceptors) - 1; i >= 0; i-- {
+			chain = buildChain(interceptors[i], chain, info)
+		}
+		return chain(ctx, req)
+	}
+}
+
+func buildChain(c grpc.UnaryServerInterceptor, n grpc.UnaryHandler, info *grpc.UnaryServerInfo) grpc.UnaryHandler {
+	return func(ctx context.Context, req interface{}) (interface{}, error) {
+		return c(ctx, req, info, n)
+	}
+}
+
+func Logger(log *zap.Logger) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		start := time.Now()
+
+		resp, err := handler(ctx, req)
+
+		duration := time.Since(start)
+		code := status.Code(err)
+
+		log.Info("grpc request",
+			zap.String("method", info.FullMethod),
+			zap.String("code", code.String()),
+			zap.Duration("duration", duration),
+			zap.Error(err),
+		)
+
+		return resp, err
+	}
+}
+
+func Metrics() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		start := time.Now()
+
+		resp, err := handler(ctx, req)
+
+		duration := time.Since(start).Seconds()
+		code := status.Code(err)
+
+		metrics.GRPCRequestsTotal.WithLabelValues(info.FullMethod, code.String()).Inc()
+		metrics.GRPCRequestDuration.WithLabelValues(info.FullMethod).Observe(duration)
+
+		return resp, err
+	}
+}
+
+func Tracing(tp trace.TracerProvider) grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req interface{}, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (interface{}, error) {
+		ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.HeaderCarrier{})
+		tr := tp.Tracer("{{.PackageName}}")
+		ctx, span := tr.Start(ctx, info.FullMethod)
+		defer span.End()
+
+		resp, err := handler(ctx, req)
+
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+
+		span.SetAttributes(
+			attribute.String("grpc.method", info.FullMethod),
+			attribute.String("grpc.code", status.Code(err).String()),
+		)
+
+		return resp, err
+	}
+}
 `,
 		Permissions: 0644,
 	},
