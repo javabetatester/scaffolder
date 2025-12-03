@@ -1082,9 +1082,33 @@ migrate-create:
 	@read -p "Migration name: " name; \
 	migrate create -ext sql -dir migrations -seq $$name
 
+.PHONY: docker-build
+docker-build:
+	docker build -t {{.PackageName}}:latest .
+
+.PHONY: docker-run
+docker-run:
+	docker run -p 8080:8080 {{.PackageName}}:latest
+
+.PHONY: docker-compose-up
+docker-compose-up:
+	docker-compose up -d
+
+.PHONY: docker-compose-down
+docker-compose-down:
+	docker-compose down
+
 .PHONY: lint
 lint:
 	golangci-lint run
+
+.PHONY: fmt
+fmt:
+	go fmt ./...
+
+.PHONY: vet
+vet:
+	go vet ./...
 
 .PHONY: clean
 clean:
@@ -1291,6 +1315,359 @@ coverage.txt
 		Permissions: 0644,
 	},
 	{
+		Path: "Dockerfile",
+		Content: `FROM golang:1.21-alpine AS builder
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o server ./cmd/server
+
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates tzdata
+WORKDIR /root/
+
+COPY --from=builder /app/server .
+COPY --from=builder /app/migrations ./migrations
+
+EXPOSE 8080
+
+CMD ["./server"]
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: ".dockerignore",
+		Content: `bin/
+dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+*.test
+*.out
+coverage.txt
+coverage.out
+coverage.html
+
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+.env
+.env.local
+
+.git/
+.gitignore
+README.md
+Makefile
+
+*.md
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "docker-compose.yml",
+		Content: `version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: {{.PackageName}}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: 8080
+      ENVIRONMENT: development
+      DATABASE_URL: postgres://user:password@postgres:5432/{{.PackageName}}?sslmode=disable
+      REDIS_URL: redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "k8s/deployment.yaml",
+		Content: `apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{.PackageName}}
+  labels:
+    app: {{.PackageName}}
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: {{.PackageName}}
+  template:
+    metadata:
+      labels:
+        app: {{.PackageName}}
+    spec:
+      containers:
+      - name: {{.PackageName}}
+        image: {{.PackageName}}:latest
+        ports:
+        - containerPort: 8080
+        env:
+        - name: PORT
+          value: "8080"
+        - name: ENVIRONMENT
+          value: "production"
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{.PackageName}}-secrets
+              key: database-url
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: {{.PackageName}}-config
+              key: redis-url
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{.PackageName}}
+spec:
+  selector:
+    app: {{.PackageName}}
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+  type: LoadBalancer
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{.PackageName}}-config
+data:
+  redis-url: "redis-service:6379"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{.PackageName}}-secrets
+type: Opaque
+stringData:
+  database-url: "postgres://user:password@postgres-service:5432/{{.PackageName}}?sslmode=disable"
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: ".github/workflows/ci.yml",
+		Content: `name: CI
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Cache dependencies
+      uses: actions/cache@v3
+      with:
+        path: ~/go/pkg/mod
+        key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+        restore-keys: |
+          ${{ runner.os }}-go-
+
+    - name: Download dependencies
+      run: go mod download
+
+    - name: Run tests
+      run: go test -v -coverprofile=coverage.out ./...
+
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./coverage.out
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Run golangci-lint
+      uses: golangci/golangci-lint-action@v3
+      with:
+        version: latest
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.21'
+
+    - name: Build
+      run: go build -o bin/server ./cmd/server
+
+    - name: Build Docker image
+      run: docker build -t {{.PackageName}}:${{ github.sha }} .
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "CONTRIBUTING.md",
+		Content: "# Contributing\n\n" +
+			"Thank you for considering contributing to {{.ProjectName}}!\n\n" +
+			"## Development Setup\n\n" +
+			"1. Fork the repository\n" +
+			"2. Clone your fork\n" +
+			"3. Create a feature branch\n" +
+			"4. Make your changes\n" +
+			"5. Run tests: make test\n" +
+			"6. Run linter: make lint\n" +
+			"7. Commit your changes\n" +
+			"8. Push to your fork\n" +
+			"9. Create a Pull Request\n\n" +
+			"## Code Style\n\n" +
+			"- Follow Go conventions\n" +
+			"- Use gofmt for formatting\n" +
+			"- Follow SOLID principles\n" +
+			"- Write tests for new features\n" +
+			"- Update documentation as needed\n\n" +
+			"## Commit Messages\n\n" +
+			"Use clear, descriptive commit messages following conventional commits format.\n",
+		Permissions: 0644,
+	},
+	{
+		Path: "LICENSE",
+		Content: `MIT License
+
+Copyright (c) 2024 {{.ProjectName}}
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "CHANGELOG.md",
+		Content: `# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Added
+- Initial project structure
+- REST API with Gin framework
+- Clean Architecture implementation
+- Structured logging with Zap
+- Prometheus metrics
+- Distributed tracing with OpenTelemetry
+- Input validation
+- Rate limiting
+- Security headers and CORS
+- PostgreSQL database support
+- Redis caching
+- Database migrations
+- Docker and Docker Compose setup
+- Kubernetes manifests
+- CI/CD with GitHub Actions
+`,
+		Permissions: 0644,
+	},
+	{
 		Path: "README.md",
 		Content: "# {{.ProjectName}}\n\n" +
 			"REST API built with Go and Gin framework following Clean Architecture principles.\n\n" +
@@ -1306,9 +1683,23 @@ coverage.txt
 			"  infrastructure/  # External concerns (DB, config, etc)\n" +
 			"```\n\n" +
 			"## Getting Started\n\n" +
+			"### Local Development\n\n" +
 			"```bash\n" +
 			"go mod download\n" +
 			"go run cmd/server/main.go\n" +
+			"```\n\n" +
+			"### Docker Compose\n\n" +
+			"```bash\n" +
+			"docker-compose up -d\n" +
+			"```\n\n" +
+			"### Docker\n\n" +
+			"```bash\n" +
+			"docker build -t {{.PackageName}} .\n" +
+			"docker run -p 8080:8080 {{.PackageName}}\n" +
+			"```\n\n" +
+			"### Kubernetes\n\n" +
+			"```bash\n" +
+			"kubectl apply -f k8s/deployment.yaml\n" +
 			"```\n\n" +
 			"## Environment Variables\n\n" +
 			"- PORT: Server port (default: 8080)\n" +
@@ -1323,7 +1714,31 @@ coverage.txt
 			"migrate -path migrations -database \"$DATABASE_URL\" up\n" +
 			"```\n\n" +
 			"## API Endpoints\n\n" +
-			"- GET /api/v1/health - Health check endpoint\n",
+			"- GET /api/v1/health - Health check endpoint\n" +
+			"- GET /metrics - Prometheus metrics endpoint\n\n" +
+			"## Architecture\n\n" +
+			"This project follows Clean Architecture principles:\n\n" +
+			"- **Domain Layer**: Business entities and repository interfaces\n" +
+			"- **UseCase Layer**: Business logic and orchestration\n" +
+			"- **Interface Layer**: HTTP handlers and routers\n" +
+			"- **Infrastructure Layer**: Database, cache, config, and external services\n\n" +
+			"## Features\n\n" +
+			"- Structured logging with Zap\n" +
+			"- Prometheus metrics\n" +
+			"- Distributed tracing with OpenTelemetry\n" +
+			"- Input validation\n" +
+			"- Rate limiting\n" +
+			"- Security headers and CORS\n" +
+			"- PostgreSQL database support\n" +
+			"- Redis caching\n" +
+			"- Database migrations\n\n" +
+			"## Development\n\n" +
+			"```bash\n" +
+			"make test          # Run tests\n" +
+			"make test-coverage # Run tests with coverage\n" +
+			"make lint         # Run linter\n" +
+			"make migrate-up    # Run database migrations\n" +
+			"```\n",
 		Permissions: 0644,
 	},
 }
