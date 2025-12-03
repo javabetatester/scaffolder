@@ -37,7 +37,7 @@ func (s *Scaffolder) Generate() error {
 	case "grpc":
 		return s.generateGRPC(vars)
 	case "cli":
-		return fmt.Errorf("cli template not yet implemented")
+		return s.generateCLI(vars)
 	default:
 		return fmt.Errorf("unknown project type: %s", s.projectType)
 	}
@@ -54,6 +54,15 @@ func (s *Scaffolder) generateREST(vars *TemplateVars) error {
 
 func (s *Scaffolder) generateGRPC(vars *TemplateVars) error {
 	for _, tmpl := range grpcTemplates {
+		if err := s.createFileFromTemplate(tmpl, vars); err != nil {
+			return fmt.Errorf("failed to create file %s: %w", tmpl.Path, err)
+		}
+	}
+	return nil
+}
+
+func (s *Scaffolder) generateCLI(vars *TemplateVars) error {
+	for _, tmpl := range cliTemplates {
 		if err := s.createFileFromTemplate(tmpl, vars); err != nil {
 			return fmt.Errorf("failed to create file %s: %w", tmpl.Path, err)
 		}
