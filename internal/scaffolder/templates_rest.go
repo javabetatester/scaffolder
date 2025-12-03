@@ -19,6 +19,10 @@ require (
 	go.opentelemetry.io/otel/sdk v1.21.0
 	golang.org/x/time v0.5.0
 	github.com/stretchr/testify v1.8.4
+	gorm.io/gorm v1.25.5
+	gorm.io/driver/postgres v1.5.4
+	github.com/redis/go-redis/v9 v9.3.0
+	github.com/golang-migrate/migrate/v4 v4.16.2
 )
 `,
 		Permissions: 0644,
@@ -36,7 +40,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/{{.ModuleName}}/internal/infrastructure/cache"
 	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+	"github.com/{{.ModuleName}}/internal/infrastructure/database"
 	"github.com/{{.ModuleName}}/internal/infrastructure/logger"
 	"github.com/{{.ModuleName}}/internal/infrastructure/metrics"
 	"github.com/{{.ModuleName}}/internal/infrastructure/router"
@@ -64,11 +70,22 @@ func main() {
 		}
 	}()
 
+	db, err := database.NewDB(cfg, log)
+	if err != nil {
+		log.Fatal("failed to initialize database", zap.Error(err))
+	}
+
+	redisCache, err := cache.NewCache(cfg, log)
+	if err != nil {
+		log.Fatal("failed to initialize cache", zap.Error(err))
+	}
+	defer redisCache.Close()
+
 	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	r := router.New(cfg, log, tracer)
+	r := router.New(cfg, log, tracer, db, redisCache)
 
 	srv := &http.Server{
 		Addr:    fmt.Sprintf(":%d", cfg.ServerPort),
@@ -112,10 +129,15 @@ import (
 
 type Config struct {
 	Environment      string
-	ServerPort       int
-	MetricsPort      int
-	JaegerEndpoint   string
-	LogLevel         string
+	ServerPort        int
+	MetricsPort       int
+	JaegerEndpoint    string
+	LogLevel          string
+	DatabaseURL       string
+	DatabaseMaxConns  int
+	RedisURL          string
+	RedisPassword     string
+	RedisDB           int
 }
 
 func Load() *Config {
@@ -148,12 +170,43 @@ func Load() *Config {
 		jaegerEndpoint = "http://localhost:14268/api/traces"
 	}
 
+	databaseURL := os.Getenv("DATABASE_URL")
+	if databaseURL == "" {
+		databaseURL = "postgres://user:password@localhost:5432/{{.PackageName}}?sslmode=disable"
+	}
+
+	maxConns := 25
+	if maxConnsStr := os.Getenv("DATABASE_MAX_CONNS"); maxConnsStr != "" {
+		if mc, err := strconv.Atoi(maxConnsStr); err == nil {
+			maxConns = mc
+		}
+	}
+
+	redisURL := os.Getenv("REDIS_URL")
+	if redisURL == "" {
+		redisURL = "localhost:6379"
+	}
+
+	redisPassword := os.Getenv("REDIS_PASSWORD")
+
+	redisDB := 0
+	if redisDBStr := os.Getenv("REDIS_DB"); redisDBStr != "" {
+		if db, err := strconv.Atoi(redisDBStr); err == nil {
+			redisDB = db
+		}
+	}
+
 	return &Config{
-		Environment:    env,
-		ServerPort:     port,
-		MetricsPort:    metricsPort,
-		JaegerEndpoint: jaegerEndpoint,
-		LogLevel:       logLevel,
+		Environment:     env,
+		ServerPort:       port,
+		MetricsPort:      metricsPort,
+		JaegerEndpoint:   jaegerEndpoint,
+		LogLevel:         logLevel,
+		DatabaseURL:      databaseURL,
+		DatabaseMaxConns: maxConns,
+		RedisURL:         redisURL,
+		RedisPassword:    redisPassword,
+		RedisDB:          redisDB,
 	}
 }
 `,
@@ -164,15 +217,18 @@ func Load() *Config {
 		Content: `package router
 
 import (
+	"github.com/{{.ModuleName}}/internal/infrastructure/cache"
 	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+	"github.com/{{.ModuleName}}/internal/infrastructure/database"
 	"github.com/{{.ModuleName}}/internal/infrastructure/middleware"
 	"github.com/{{.ModuleName}}/internal/interface/http/handler"
 	"github.com/gin-gonic/gin"
 	"go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+	"gorm.io/gorm"
 )
 
-func New(cfg *config.Config, log *zap.Logger, tracer trace.TracerProvider) *gin.Engine {
+func New(cfg *config.Config, log *zap.Logger, tracer trace.TracerProvider, db *gorm.DB, cache *cache.Cache) *gin.Engine {
 	r := gin.New()
 
 	r.Use(middleware.Logger(log))
@@ -185,7 +241,7 @@ func New(cfg *config.Config, log *zap.Logger, tracer trace.TracerProvider) *gin.
 
 	api := r.Group("/api/v1")
 	{
-		healthHandler := handler.NewHealthHandler(log)
+		healthHandler := handler.NewHealthHandler(log, db, cache)
 		api.GET("/health", healthHandler.Check)
 		api.GET("/metrics", middleware.PrometheusHandler())
 	}
@@ -656,19 +712,35 @@ import (
 )
 
 type HealthHandler struct {
-	log *zap.Logger
+	log    *zap.Logger
+	db     interface{}
+	cache  interface{}
 }
 
-func NewHealthHandler(log *zap.Logger) *HealthHandler {
+func NewHealthHandler(log *zap.Logger, db interface{}, cache interface{}) *HealthHandler {
 	return &HealthHandler{
-		log: log,
+		log:   log,
+		db:    db,
+		cache: cache,
 	}
 }
 
 func (h *HealthHandler) Check(c *gin.Context) {
 	h.log.Debug("health check requested")
+	
+	status := "ok"
+	
+	if h.db != nil {
+		if db, ok := h.db.(interface{ Ping() error }); ok {
+			if err := db.Ping(); err != nil {
+				status = "degraded"
+				h.log.Warn("database health check failed", zap.Error(err))
+			}
+		}
+	}
+	
 	c.JSON(http.StatusOK, gin.H{
-		"status": "ok",
+		"status": status,
 	})
 }
 `,
@@ -1005,6 +1077,178 @@ lint:
 clean:
 	rm -rf bin/
 	rm -f coverage.out coverage.html
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/infrastructure/database/database.go",
+		Content: `package database
+
+import (
+	"fmt"
+	"time"
+
+	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+	"go.uber.org/zap"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
+	"gorm.io/gorm/logger"
+)
+
+func NewDB(cfg *config.Config, log *zap.Logger) (*gorm.DB, error) {
+	db, err := gorm.Open(postgres.Open(cfg.DatabaseURL), &gorm.Config{
+		Logger: logger.Default.LogMode(logger.Silent),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	sqlDB, err := db.DB()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get sql.DB: %w", err)
+	}
+
+	sqlDB.SetMaxOpenConns(cfg.DatabaseMaxConns)
+	sqlDB.SetMaxIdleConns(5)
+	sqlDB.SetConnMaxLifetime(time.Hour)
+
+	if err := sqlDB.Ping(); err != nil {
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	log.Info("database connected successfully")
+
+	return db, nil
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/infrastructure/cache/cache.go",
+		Content: `package cache
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+	"github.com/redis/go-redis/v9"
+	"go.uber.org/zap"
+)
+
+type Cache struct {
+	client *redis.Client
+}
+
+func NewCache(cfg *config.Config, log *zap.Logger) (*Cache, error) {
+	client := redis.NewClient(&redis.Options{
+		Addr:     cfg.RedisURL,
+		Password: cfg.RedisPassword,
+		DB:       cfg.RedisDB,
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := client.Ping(ctx).Err(); err != nil {
+		return nil, fmt.Errorf("failed to connect to redis: %w", err)
+	}
+
+	log.Info("redis connected successfully")
+
+	return &Cache{client: client}, nil
+}
+
+func (c *Cache) Get(ctx context.Context, key string) (string, error) {
+	return c.client.Get(ctx, key).Result()
+}
+
+func (c *Cache) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
+	return c.client.Set(ctx, key, value, expiration).Err()
+}
+
+func (c *Cache) Delete(ctx context.Context, key string) error {
+	return c.client.Del(ctx, key).Err()
+}
+
+func (c *Cache) Close() error {
+	return c.client.Close()
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/infrastructure/repository/postgres_repository.go",
+		Content: `package repository
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/{{.ModuleName}}/internal/domain/entity"
+	domainRepo "github.com/{{.ModuleName}}/internal/domain/repository"
+	"gorm.io/gorm"
+)
+
+type PostgresRepository struct {
+	db *gorm.DB
+}
+
+func NewPostgresRepository(db *gorm.DB) domainRepo.Repository {
+	return &PostgresRepository{db: db}
+}
+
+func (r *PostgresRepository) FindByID(id string) (*entity.Entity, error) {
+	var e entity.Entity
+	if err := r.db.First(&e, "id = ?", id).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, fmt.Errorf("entity not found: %s", id)
+		}
+		return nil, fmt.Errorf("failed to find entity: %w", err)
+	}
+	return &e, nil
+}
+
+func (r *PostgresRepository) Create(e *entity.Entity) error {
+	if err := r.db.Create(e).Error; err != nil {
+		return fmt.Errorf("failed to create entity: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) Update(e *entity.Entity) error {
+	if err := r.db.Save(e).Error; err != nil {
+		return fmt.Errorf("failed to update entity: %w", err)
+	}
+	return nil
+}
+
+func (r *PostgresRepository) Delete(id string) error {
+	if err := r.db.Delete(&entity.Entity{}, "id = ?", id).Error; err != nil {
+		return fmt.Errorf("failed to delete entity: %w", err)
+	}
+	return nil
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "migrations/000001_create_entities.up.sql",
+		Content: `CREATE TABLE IF NOT EXISTS entities (
+    id VARCHAR(255) PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_entities_created_at ON entities(created_at);
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "migrations/000001_create_entities.down.sql",
+		Content: `DROP INDEX IF EXISTS idx_entities_created_at;
+DROP TABLE IF EXISTS entities;
 `,
 		Permissions: 0644,
 	},

@@ -347,8 +347,8 @@ coverage.txt
 		Permissions: 0644,
 	},
 	{
-		Path: "internal/cmd/example_test.go",
-		Content: `package cmd
+		Path: "internal/pkg/logger/logger_test.go",
+		Content: `package logger
 
 import (
 	"testing"
@@ -356,32 +356,25 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestExampleCmd(t *testing.T) {
+func TestNew(t *testing.T) {
 	tests := []struct {
 		name    string
-		args    []string
-		wantErr bool
+		verbose bool
 	}{
 		{
-			name:    "valid name",
-			args:    []string{"test"},
-			wantErr: false,
+			name:    "verbose mode",
+			verbose: true,
 		},
 		{
-			name:    "empty name",
-			args:    []string{""},
-			wantErr: true,
+			name:    "non-verbose mode",
+			verbose: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := exampleCmd.RunE(exampleCmd, tt.args)
-			if tt.wantErr {
-				assert.Error(t, err)
-			} else {
-				assert.NoError(t, err)
-			}
+			log := New(tt.verbose)
+			assert.NotNil(t, log)
 		})
 	}
 }
