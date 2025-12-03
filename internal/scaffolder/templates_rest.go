@@ -9,12 +9,16 @@ go 1.21
 
 require (
 	github.com/gin-gonic/gin v1.9.1
+	github.com/gin-contrib/cors v1.5.0
+	github.com/go-playground/validator/v10 v10.16.0
 	go.uber.org/zap v1.26.0
 	github.com/prometheus/client_golang v1.18.0
 	go.opentelemetry.io/otel v1.21.0
 	go.opentelemetry.io/otel/trace v1.21.0
 	go.opentelemetry.io/otel/exporters/jaeger v1.17.0
 	go.opentelemetry.io/otel/sdk v1.21.0
+	golang.org/x/time v0.5.0
+	github.com/stretchr/testify v1.8.4
 )
 `,
 		Permissions: 0644,
@@ -173,6 +177,9 @@ func New(cfg *config.Config, log *zap.Logger, tracer trace.TracerProvider) *gin.
 
 	r.Use(middleware.Logger(log))
 	r.Use(middleware.Recovery(log))
+	r.Use(middleware.SecurityHeaders())
+	r.Use(middleware.CORS(cfg))
+	r.Use(middleware.RateLimit())
 	r.Use(middleware.Metrics())
 	r.Use(middleware.Tracing(tracer))
 
@@ -495,8 +502,10 @@ func (t *Tracer) Shutdown(ctx context.Context) error {
 import (
 	"time"
 
+	"github.com/{{.ModuleName}}/internal/infrastructure/config"
 	"github.com/{{.ModuleName}}/internal/infrastructure/metrics"
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/propagation"
@@ -576,6 +585,62 @@ func PrometheusHandler() gin.HandlerFunc {
 		c.Redirect(302, "/metrics")
 	}
 }
+
+func SecurityHeaders() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("X-Content-Type-Options", "nosniff")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("X-XSS-Protection", "1; mode=block")
+		c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		c.Header("Content-Security-Policy", "default-src 'self'")
+		c.Next()
+	}
+}
+
+func CORS(cfg *config.Config) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		origin := c.GetHeader("Origin")
+		allowedOrigins := []string{"*"}
+		
+		if cfg.Environment == "production" {
+			allowedOrigins = []string{"https://example.com"}
+		}
+
+		allowed := false
+		for _, o := range allowedOrigins {
+			if o == "*" || o == origin {
+				allowed = true
+				break
+			}
+		}
+
+		if allowed {
+			c.Header("Access-Control-Allow-Origin", origin)
+			c.Header("Access-Control-Allow-Credentials", "true")
+			c.Header("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
+			c.Header("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE, PATCH")
+		}
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	}
+}
+
+func RateLimit() gin.HandlerFunc {
+	limiter := rate.NewLimiter(rate.Limit(100), 200)
+	return func(c *gin.Context) {
+		if !limiter.Allow() {
+			c.JSON(429, gin.H{"error": "too many requests"})
+			c.Abort()
+			return
+		}
+		c.Next()
+	}
+}
 `,
 		Permissions: 0644,
 	},
@@ -606,6 +671,340 @@ func (h *HealthHandler) Check(c *gin.Context) {
 		"status": "ok",
 	})
 }
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/pkg/validation/validation.go",
+		Content: `package validation
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/go-playground/validator/v10"
+	"github.com/gin-gonic/gin"
+)
+
+var validate *validator.Validate
+
+func init() {
+	validate = validator.New(validator.WithRequiredStructEnabled())
+}
+
+func ValidateStruct(s interface{}) error {
+	return validate.Struct(s)
+}
+
+func ValidateRequest(c *gin.Context, req interface{}) error {
+	if err := c.ShouldBindJSON(req); err != nil {
+		return err
+	}
+
+	if err := ValidateStruct(req); err != nil {
+		validationErrors := err.(validator.ValidationErrors)
+		var errors []string
+		for _, e := range validationErrors {
+			errors = append(errors, fmt.Sprintf("%s: %s", e.Field(), e.Tag()))
+		}
+		return fmt.Errorf("validation failed: %s", strings.Join(errors, ", "))
+	}
+
+	return nil
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/interface/http/handler/health_handler_test.go",
+		Content: `package handler
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+)
+
+func TestHealthHandler_Check(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	log := zap.NewNop()
+
+	handler := NewHealthHandler(log)
+
+	tests := []struct {
+		name           string
+		expectedStatus int
+		expectedBody   string
+	}{
+		{
+			name:           "should return ok status",
+			expectedStatus: http.StatusOK,
+			expectedBody:   "{\"status\":\"ok\"}",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest("GET", "/health", nil)
+
+			handler.Check(c)
+
+			assert.Equal(t, tt.expectedStatus, w.Code)
+			assert.JSONEq(t, tt.expectedBody, w.Body.String())
+		})
+	}
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/usecase/usecase_test.go",
+		Content: `package usecase
+
+import (
+	"context"
+	"testing"
+
+	"github.com/{{.ModuleName}}/internal/domain/entity"
+	"github.com/{{.ModuleName}}/internal/domain/repository"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+)
+
+type MockRepository struct {
+	mock.Mock
+}
+
+var _ repository.Repository = (*MockRepository)(nil)
+
+func (m *MockRepository) FindByID(id string) (*entity.Entity, error) {
+	args := m.Called(id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*entity.Entity), args.Error(1)
+}
+
+func (m *MockRepository) Create(e *entity.Entity) error {
+	args := m.Called(e)
+	return args.Error(0)
+}
+
+func (m *MockRepository) Update(e *entity.Entity) error {
+	args := m.Called(e)
+	return args.Error(0)
+}
+
+func (m *MockRepository) Delete(id string) error {
+	args := m.Called(id)
+	return args.Error(0)
+}
+
+func TestUseCase_GetEntity(t *testing.T) {
+	mockRepo := new(MockRepository)
+	useCase := NewUseCase(mockRepo)
+
+	ctx := context.Background()
+	expectedEntity := &entity.Entity{ID: "123"}
+
+	mockRepo.On("FindByID", "123").Return(expectedEntity, nil)
+
+	result, err := useCase.repo.FindByID("123")
+
+	assert.NoError(t, err)
+	assert.Equal(t, expectedEntity, result)
+	mockRepo.AssertExpectations(t)
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/infrastructure/repository/memory_repository_test.go",
+		Content: `package repository
+
+import (
+	"testing"
+
+	"github.com/{{.ModuleName}}/internal/domain/entity"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestMemoryRepository_Create(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	e := &entity.Entity{ID: "123"}
+
+	err := repo.Create(e)
+	assert.NoError(t, err)
+
+	err = repo.Create(e)
+	assert.Error(t, err)
+}
+
+func TestMemoryRepository_FindByID(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	e := &entity.Entity{ID: "123"}
+	repo.Create(e)
+
+	found, err := repo.FindByID("123")
+	assert.NoError(t, err)
+	assert.Equal(t, e, found)
+
+	_, err = repo.FindByID("nonexistent")
+	assert.Error(t, err)
+}
+
+func TestMemoryRepository_Update(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	e := &entity.Entity{ID: "123"}
+	repo.Create(e)
+
+	err := repo.Update(e)
+	assert.NoError(t, err)
+
+	nonexistent := &entity.Entity{ID: "nonexistent"}
+	err = repo.Update(nonexistent)
+	assert.Error(t, err)
+}
+
+func TestMemoryRepository_Delete(t *testing.T) {
+	repo := NewMemoryRepository()
+
+	e := &entity.Entity{ID: "123"}
+	repo.Create(e)
+
+	err := repo.Delete("123")
+	assert.NoError(t, err)
+
+	_, err = repo.FindByID("123")
+	assert.Error(t, err)
+
+	err = repo.Delete("nonexistent")
+	assert.Error(t, err)
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "internal/pkg/validation/validation_test.go",
+		Content: `package validation
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+type TestStruct struct {
+	Name  string ` + "`validate:\"required,min=3,max=100\"`" + `
+	Email string ` + "`validate:\"required,email\"`" + `
+	Age   int    ` + "`validate:\"min=18,max=120\"`" + `
+}
+
+func TestValidateStruct(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   TestStruct
+		wantErr bool
+	}{
+		{
+			name: "valid struct",
+			input: TestStruct{
+				Name:  "John Doe",
+				Email: "john@example.com",
+				Age:   25,
+			},
+			wantErr: false,
+		},
+		{
+			name: "invalid name too short",
+			input: TestStruct{
+				Name:  "Jo",
+				Email: "john@example.com",
+				Age:   25,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid email",
+			input: TestStruct{
+				Name:  "John Doe",
+				Email: "invalid-email",
+				Age:   25,
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid age",
+			input: TestStruct{
+				Name:  "John Doe",
+				Email: "john@example.com",
+				Age:   10,
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateStruct(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "Makefile",
+		Content: `BINARY_NAME={{.PackageName}}
+CMD_PATH=cmd/server
+
+.PHONY: build
+build:
+	go build -o bin/$(BINARY_NAME) $(CMD_PATH)/main.go
+
+.PHONY: run
+run:
+	go run $(CMD_PATH)/main.go
+
+.PHONY: test
+test:
+	go test -v ./...
+
+.PHONY: test-coverage
+test-coverage:
+	go test -v -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+
+.PHONY: test-unit
+test-unit:
+	go test -v -short ./...
+
+.PHONY: test-integration
+test-integration:
+	go test -v -tags=integration ./...
+
+.PHONY: lint
+lint:
+	golangci-lint run
+
+.PHONY: clean
+clean:
+	rm -rf bin/
+	rm -f coverage.out coverage.html
 `,
 		Permissions: 0644,
 	},

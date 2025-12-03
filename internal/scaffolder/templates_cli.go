@@ -11,6 +11,7 @@ require (
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2
 	go.uber.org/zap v1.26.0
+	github.com/stretchr/testify v1.8.4
 )
 `,
 		Permissions: 0644,
@@ -346,6 +347,48 @@ coverage.txt
 		Permissions: 0644,
 	},
 	{
+		Path: "internal/cmd/example_test.go",
+		Content: `package cmd
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestExampleCmd(t *testing.T) {
+	tests := []struct {
+		name    string
+		args    []string
+		wantErr bool
+	}{
+		{
+			name:    "valid name",
+			args:    []string{"test"},
+			wantErr: false,
+		},
+		{
+			name:    "empty name",
+			args:    []string{""},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := exampleCmd.RunE(exampleCmd, tt.args)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+`,
+		Permissions: 0644,
+	},
+	{
 		Path: "Makefile",
 		Content: `BINARY_NAME={{.PackageName}}
 CMD_PATH=cmd/{{.PackageName}}
@@ -369,7 +412,16 @@ clean:
 
 .PHONY: test
 test:
-	go test ./...
+	go test -v ./...
+
+.PHONY: test-coverage
+test-coverage:
+	go test -v -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+
+.PHONY: test-unit
+test-unit:
+	go test -v -short ./...
 
 .PHONY: lint
 lint:

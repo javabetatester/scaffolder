@@ -699,6 +699,182 @@ func Tracing(tp trace.TracerProvider) grpc.UnaryServerInterceptor {
 		Permissions: 0644,
 	},
 	{
+		Path: "internal/infrastructure/server/grpc_server_test.go",
+		Content: `package server
+
+import (
+	"context"
+	"testing"
+
+	pb "github.com/{{.ModuleName}}/proto/{{.PackageName}}"
+	"github.com/stretchr/testify/assert"
+	"go.uber.org/zap"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+func TestGRPCServer_HealthCheck(t *testing.T) {
+	log := zap.NewNop()
+	server := NewGRPCServer(log)
+
+	req := &pb.HealthCheckRequest{}
+	resp, err := server.HealthCheck(context.Background(), req)
+
+	assert.NoError(t, err)
+	assert.Equal(t, "ok", resp.Status)
+}
+
+func TestGRPCServer_CreateEntity(t *testing.T) {
+	log := zap.NewNop()
+	server := NewGRPCServer(log)
+
+	tests := []struct {
+		name    string
+		req     *pb.CreateEntityRequest
+		wantErr bool
+		errCode codes.Code
+	}{
+		{
+			name:    "valid request",
+			req:     &pb.CreateEntityRequest{Name: "Test Entity"},
+			wantErr: false,
+		},
+		{
+			name:    "empty name",
+			req:     &pb.CreateEntityRequest{Name: ""},
+			wantErr: true,
+			errCode: codes.InvalidArgument,
+		},
+		{
+			name:    "name too long",
+			req:     &pb.CreateEntityRequest{Name: string(make([]byte, 101))},
+			wantErr: true,
+			errCode: codes.InvalidArgument,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := server.CreateEntity(context.Background(), tt.req)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, resp)
+				st, ok := status.FromError(err)
+				assert.True(t, ok)
+				assert.Equal(t, tt.errCode, st.Code())
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, resp)
+				assert.NotEmpty(t, resp.Id)
+				assert.Equal(t, tt.req.Name, resp.Name)
+			}
+		})
+	}
+}
+
+func TestGRPCServer_GetEntity(t *testing.T) {
+	log := zap.NewNop()
+	server := NewGRPCServer(log)
+
+	createReq := &pb.CreateEntityRequest{Name: "Test Entity"}
+	created, err := server.CreateEntity(context.Background(), createReq)
+	assert.NoError(t, err)
+
+	tests := []struct {
+		name    string
+		req     *pb.GetEntityRequest
+		wantErr bool
+		errCode codes.Code
+	}{
+		{
+			name:    "valid request",
+			req:     &pb.GetEntityRequest{Id: created.Id},
+			wantErr: false,
+		},
+		{
+			name:    "empty id",
+			req:     &pb.GetEntityRequest{Id: ""},
+			wantErr: true,
+			errCode: codes.InvalidArgument,
+		},
+		{
+			name:    "nonexistent entity",
+			req:     &pb.GetEntityRequest{Id: "nonexistent"},
+			wantErr: true,
+			errCode: codes.NotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp, err := server.GetEntity(context.Background(), tt.req)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Nil(t, resp)
+				st, ok := status.FromError(err)
+				assert.True(t, ok)
+				assert.Equal(t, tt.errCode, st.Code())
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, resp)
+				assert.Equal(t, created.Id, resp.Id)
+			}
+		})
+	}
+}
+`,
+		Permissions: 0644,
+	},
+	{
+		Path: "Makefile",
+		Content: `PROTOC_GEN_GO := $(shell which protoc-gen-go)
+PROTOC_GEN_GRPC_GO := $(shell which protoc-gen-go-grpc)
+
+.PHONY: proto
+proto:
+	@if [ -z "$(PROTOC_GEN_GO)" ]; then \
+		echo "Installing protoc-gen-go..."; \
+		go install google.golang.org/protobuf/cmd/protoc-gen-go@latest; \
+	fi
+	@if [ -z "$(PROTOC_GEN_GRPC_GO)" ]; then \
+		echo "Installing protoc-gen-go-grpc..."; \
+		go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest; \
+	fi
+	protoc --go_out=. --go_opt=paths=source_relative \\
+		--go-grpc_out=. --go-grpc_opt=paths=source_relative \\
+		proto/*.proto
+
+.PHONY: run
+run:
+	go run cmd/server/main.go
+
+.PHONY: build
+build:
+	go build -o bin/server cmd/server/main.go
+
+.PHONY: test
+test:
+	go test -v ./...
+
+.PHONY: test-coverage
+test-coverage:
+	go test -v -coverprofile=coverage.out ./...
+	go tool cover -html=coverage.out -o coverage.html
+
+.PHONY: test-unit
+test-unit:
+	go test -v -short ./...
+
+.PHONY: clean
+clean:
+	rm -rf bin/
+	rm -f coverage.out coverage.html
+`,
+		Permissions: 0644,
+	},
+	{
 		Path: ".gitignore",
 		Content: `bin/
 dist/
