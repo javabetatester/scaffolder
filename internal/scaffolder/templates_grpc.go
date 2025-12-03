@@ -18,6 +18,10 @@ require (
 	google.golang.org/grpc v1.60.1
 	google.golang.org/protobuf v1.31.0
 	github.com/stretchr/testify v1.8.4
+	gorm.io/gorm v1.25.5
+	gorm.io/driver/postgres v1.5.4
+	github.com/redis/go-redis/v9 v9.3.0
+	github.com/golang-migrate/migrate/v4 v4.16.2
 )
 `,
 		Permissions: 0644,
@@ -36,7 +40,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/{{.ModuleName}}/internal/infrastructure/cache"
 	"github.com/{{.ModuleName}}/internal/infrastructure/config"
+	"github.com/{{.ModuleName}}/internal/infrastructure/database"
 	"github.com/{{.ModuleName}}/internal/infrastructure/interceptor"
 	"github.com/{{.ModuleName}}/internal/infrastructure/logger"
 	"github.com/{{.ModuleName}}/internal/infrastructure/metrics"
