@@ -72,6 +72,17 @@ func main() {
 		}
 	}()
 
+	db, err := database.NewDB(cfg, log)
+	if err != nil {
+		log.Fatal("failed to initialize database", zap.Error(err))
+	}
+
+	redisCache, err := cache.NewCache(cfg, log)
+	if err != nil {
+		log.Fatal("failed to initialize cache", zap.Error(err))
+	}
+	defer redisCache.Close()
+
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.ServerPort))
 	if err != nil {
 		log.Fatal("failed to listen", zap.Error(err))
@@ -85,7 +96,7 @@ func main() {
 		)),
 	)
 
-	grpcServer := server.NewGRPCServer(log)
+	grpcServer := server.NewGRPCServer(log, db, redisCache)
 	pb.Register{{.ProjectNamePascal}}ServiceServer(s, grpcServer)
 
 	go func() {
@@ -240,15 +251,19 @@ type GRPCServer struct {
 	pb.Unimplemented{{.ProjectNamePascal}}ServiceServer
 	useCase *usecase.UseCase
 	log     *zap.Logger
+	db      interface{}
+	cache   interface{}
 }
 
-func NewGRPCServer(log *zap.Logger) *GRPCServer {
+func NewGRPCServer(log *zap.Logger, db interface{}, cache interface{}) *GRPCServer {
 	repo := repository.NewRepository()
 	useCase := usecase.NewUseCase(repo)
 
 	return &GRPCServer{
 		useCase: useCase,
 		log:     log,
+		db:      db,
+		cache:   cache,
 	}
 }
 
