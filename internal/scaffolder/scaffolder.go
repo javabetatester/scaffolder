@@ -32,6 +32,10 @@ func (s *Scaffolder) Generate() error {
 	return nil
 }
 
+func (s *Scaffolder) TemplateVars() *TemplateVars {
+	return s.buildTemplateVars()
+}
+
 func (s *Scaffolder) validate() error {
 	validTypes := map[string]bool{
 		"rest": true,
