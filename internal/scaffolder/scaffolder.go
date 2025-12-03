@@ -29,6 +29,26 @@ func (s *Scaffolder) Generate() error {
 		return fmt.Errorf("failed to create output directory: %w", err)
 	}
 
+	vars := s.buildTemplateVars()
+
+	switch s.projectType {
+	case "rest":
+		return s.generateREST(vars)
+	case "grpc":
+		return fmt.Errorf("grpc template not yet implemented")
+	case "cli":
+		return fmt.Errorf("cli template not yet implemented")
+	default:
+		return fmt.Errorf("unknown project type: %s", s.projectType)
+	}
+}
+
+func (s *Scaffolder) generateREST(vars *TemplateVars) error {
+	for _, tmpl := range restTemplates {
+		if err := s.createFileFromTemplate(tmpl, vars); err != nil {
+			return fmt.Errorf("failed to create file %s: %w", tmpl.Path, err)
+		}
+	}
 	return nil
 }
 
