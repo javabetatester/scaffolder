@@ -17,6 +17,7 @@ require (
 	go.opentelemetry.io/otel/sdk v1.21.0
 	google.golang.org/grpc v1.60.1
 	google.golang.org/protobuf v1.31.0
+	github.com/stretchr/testify v1.8.4
 )
 `,
 		Permissions: 0644,
@@ -252,6 +253,10 @@ func (s *GRPCServer) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest
 }
 
 func (s *GRPCServer) GetEntity(ctx context.Context, req *pb.GetEntityRequest) (*pb.GetEntityResponse, error) {
+	if req.Id == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "id is required")
+	}
+
 	entity, err := s.useCase.GetEntity(ctx, req.Id)
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "failed to get entity: %v", err)
@@ -264,6 +269,14 @@ func (s *GRPCServer) GetEntity(ctx context.Context, req *pb.GetEntityRequest) (*
 }
 
 func (s *GRPCServer) CreateEntity(ctx context.Context, req *pb.CreateEntityRequest) (*pb.CreateEntityResponse, error) {
+	if req.Name == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "name is required")
+	}
+
+	if len(req.Name) > 100 {
+		return nil, status.Errorf(codes.InvalidArgument, "name must be less than 100 characters")
+	}
+
 	entity, err := s.useCase.CreateEntity(ctx, req.Name)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to create entity: %v", err)
