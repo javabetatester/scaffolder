@@ -21,8 +21,8 @@ func (s *Scaffolder) createFileFromTemplate(ft FileTemplate, vars *TemplateVars)
 	fullPath := s.joinPath(processedPath)
 
 	dir := filepath.Dir(fullPath)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return fmt.Errorf("failed to create directory: %w", err)
+	if errs := os.MkdirAll(dir, 0755); errs != nil {
+		return fmt.Errorf("failed to create directory: %w", errs)
 	}
 
 	processedContent, err := s.processTemplate(ft.Content, vars)
